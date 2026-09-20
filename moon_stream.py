@@ -209,6 +209,19 @@ def T(d, xy, s, size, fill=WHITE, bold=False, anchor="lm", a=255):
     d.text(xy, s, font=font(size, bold), fill=tuple(fill) + (int(a),), anchor=anchor)
 
 
+def rrect(d, box, radius, **kw):
+    """Rounded rectangle that never raises: skips empty boxes, shrinks the radius for thin ones."""
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    if w < 1 or h < 1:
+        return
+    r = int(max(0, min(radius, w / 2 - 1, h / 2 - 1)))
+    if r < 1:
+        d.rectangle((x0, y0, x1, y1), **kw)
+    else:
+        d.rounded_rectangle((x0, y0, x1, y1), r, **kw)
+
+
 def clamp01(x):
     return max(0.0, min(1.0, x))
 
@@ -221,7 +234,11 @@ def ease(x):
 @lru_cache(maxsize=128)
 def _mask(w, h, radius, alpha):
     m = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(m).rounded_rectangle((0, 0, w - 1, h - 1), radius, fill=alpha)
+    r = max(0, min(radius, w // 2 - 2, h // 2 - 2))
+    if r < 1:
+        ImageDraw.Draw(m).rectangle((0, 0, w - 1, h - 1), fill=alpha)
+    else:
+        ImageDraw.Draw(m).rounded_rectangle((0, 0, w - 1, h - 1), r, fill=alpha)
     return m
 
 
@@ -557,6 +574,7 @@ class Show:
         self.moon_key = None
         self.cur = None
         self.banner = None
+        self._last_err = 0.0
         self.q_off = random.randrange(len(QUIZ))
         self.f_off = random.randrange(len(FACTS))
         self.cta = ["Like the stream and subscribe for more skywatching",
@@ -663,9 +681,15 @@ class Show:
         img = Image.fromarray(frame)
         d = ImageDraw.Draw(img, "RGBA")
         T(d, (W // 2, 50), "INTERNATIONAL OBSERVE THE MOON NIGHT", 40, WHITE, True, "mm")
-        getattr(self, "_draw_" + scene)(d, img, now, t, tl, dur)
-        self._draw_banner(d, img, t, scene)
-        self._draw_ribbon(d, img, t)
+        for step in (lambda: getattr(self, "_draw_" + scene)(d, img, now, t, tl, dur),
+                     lambda: self._draw_banner(d, img, t, scene),
+                     lambda: self._draw_ribbon(d, img, t)):
+            try:
+                step()
+            except Exception as e:  # noqa: BLE001 - keep streaming, log at most once a minute
+                if time.time() - self._last_err > 60:
+                    self._last_err = time.time()
+                    print(f"[warn] draw error in scene '{scene}': {e!r}", flush=True)
         T(d, (W - 18, H - 14), "Northern hemisphere view  -  phases computed from Sun/Moon positions", 13, DIM, False, "rm")
         self.frame_no += 1
         return img.tobytes()
@@ -709,7 +733,7 @@ class Show:
         y = 138 - (1 - ease(age / 0.5)) * 30
         w = min(font(24, True).getlength(b["text"]), W - 140)
         panel(img, (W / 2 - w / 2 - 28, y - 22, W / 2 + w / 2 + 28, y + 22), alpha=int(190 * a), radius=22, fill=(20, 36, 84))
-        d.rounded_rectangle((W / 2 - w / 2 - 28, y - 22, W / 2 + w / 2 + 28, y + 22), 22,
+        rrect(d, (W / 2 - w / 2 - 28, y - 22, W / 2 + w / 2 + 28, y + 22), 22,
                             outline=ACCENT + (int(200 * a),), width=2)
         T(d, (W // 2, y), b["text"], 24, WHITE, True, "mm", int(255 * a))
 
@@ -726,8 +750,8 @@ class Show:
         T(d, (60, cy - 40), phase_name(self.age), 32, WHITE, True)
         T(d, (60, cy + 5), f"{self.illum * 100:.0f}% illuminated", 24, SOFT)
         T(d, (60, cy + 42), f"Moon age {self.age:.1f} days", 20, DIM)
-        d.rounded_rectangle((60, cy + 68, 300, cy + 76), 4, fill=(255, 255, 255, 35))
-        d.rounded_rectangle((60, cy + 68, 60 + 240 * self.illum, cy + 76), 4, fill=GOLD + (230,))
+        rrect(d, (60, cy + 68, 300, cy + 76), 4, fill=(255, 255, 255, 35))
+        rrect(d, (60, cy + 68, 60 + 240 * self.illum, cy + 76), 4, fill=GOLD + (230,))
         # right panel
         rx = W - 60
         T(d, (rx, cy - 45), now.strftime("%H:%M:%S") + " UTC", 34, WHITE, True, "rm")
@@ -784,7 +808,7 @@ class Show:
             faded = revealed and i != q["a"]
             fill = (30, 110, 70) if correct else (28, 40, 84)
             panel(img, (x0, y0, x0 + 300, y0 + 125), alpha=90 if faded else 185, radius=16, fill=fill)
-            d.rounded_rectangle((x0, y0, x0 + 300, y0 + 125), 16,
+            rrect(d, (x0, y0, x0 + 300, y0 + 125), 16,
                                 outline=(GREEN if correct else ACCENT) + (255 if correct else (60 if faded else 150),), width=3)
             d.ellipse((x0 + 12, y0 + 12, x0 + 46, y0 + 46), fill=(GREEN if correct else ACCENT) + (255 if not faded else 90,))
             T(d, (x0 + 29, y0 + 29), "ABC"[i], 20, (10, 16, 36), True, "mm")
@@ -798,8 +822,8 @@ class Show:
                 T(d, (x0 + 150, y0 + 112), label, 15, SOFT, False, "mm", 120 if faded else 230)
         if not revealed:
             bx0, bx1, by = 170, 1110, 445
-            d.rounded_rectangle((bx0, by, bx1, by + 12), 6, fill=(255, 255, 255, 40))
-            d.rounded_rectangle((bx0, by, bx0 + (bx1 - bx0) * clamp01(rem / QUIZ_SECONDS), by + 12), 6,
+            rrect(d, (bx0, by, bx1, by + 12), 6, fill=(255, 255, 255, 40))
+            rrect(d, (bx0, by, bx0 + (bx1 - bx0) * clamp01(rem / QUIZ_SECONDS), by + 12), 6,
                                 fill=(RED if rem < 8 else ACCENT) + (240,))
             msg = ("Type A, B or C in chat!" if self.chat.enabled else "Think you know it?")
             T(d, (W // 2, 493), f"{msg}   {int(math.ceil(rem))}s", 26, GOLD, True, "mm")
@@ -839,7 +863,7 @@ class Show:
         T(d, (rx, cy - 30), (now + timedelta(days=p * SYNODIC)).strftime("%d %b %Y"), 30, WHITE, True, "rm")
         T(d, (rx, cy + 10), "simulated date", 20, DIM, False, "rm")
         x0, x1, y = 190, 1090, 596
-        d.rounded_rectangle((x0, y - 3, x1, y + 3), 3, fill=(255, 255, 255, 60))
+        rrect(d, (x0, y - 3, x1, y + 3), 3, fill=(255, 255, 255, 60))
         for k, lab in enumerate(("New", "First Quarter", "Full", "Last Quarter", "New")):
             x = x0 + (x1 - x0) * k / 4
             d.ellipse((x - 4, y - 4, x + 4, y + 4), fill=(200, 210, 235, 200))
@@ -981,8 +1005,11 @@ def main():
     while end - time.time() > 10:
         remaining = end - time.time()
         print(f"Streaming for {int(remaining)}s...", flush=True)
-        code = run_segment(show, output_url, remaining)
-        print(f"ffmpeg exited with code {code}; restarting in 5s", flush=True)
+        try:
+            code = run_segment(show, output_url, remaining)
+            print(f"ffmpeg exited with code {code}; restarting in 5s", flush=True)
+        except Exception as e:  # noqa: BLE001 - keep the stream alive no matter what
+            print(f"[error] segment crashed: {e!r}; restarting in 5s", flush=True)
         time.sleep(5)
     print("Segment finished - next run takes over.", flush=True)
 
