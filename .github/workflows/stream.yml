@@ -1,0 +1,51 @@
+name: Moon Night 24/7 Live Stream
+
+on:
+  workflow_dispatch:          # start manually from the Actions tab
+  schedule:
+    - cron: "17 * * * *"      # safety net: restarts the chain if it ever breaks
+
+# Only one stream at a time; a new run waits for the current one to finish.
+concurrency:
+  group: moon-stream
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: write              # lets the job queue its own successor
+
+jobs:
+  stream:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355      # GitHub-hosted runners stop jobs at 6 hours
+    steps:
+      - uses: actions/checkout@v4
+
+      # Queue the next segment now; it waits (via concurrency) and starts the
+      # moment this one ends, keeping the gap short.
+      - name: Queue next segment
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run stream.yml --ref "${{ github.ref_name }}"
+
+      - name: Install ffmpeg, fonts and Python libs
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ffmpeg fonts-dejavu-core python3-numpy python3-pil
+
+      # Optional: live chat features (quiz voting, !hello, !fact).
+      # Only installed when the repo variable YOUTUBE_VIDEO_ID is set.
+      - name: Install live-chat support (optional)
+        env:
+          VID: ${{ vars.YOUTUBE_VIDEO_ID }}
+        run: |
+          if [ -n "$VID" ]; then
+            sudo apt-get install -y -qq python3-pip
+            pip install --quiet --break-system-packages pytchat || echo "pytchat install failed - chat features off"
+          fi
+
+      - name: Go live
+        env:
+          YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
+          YOUTUBE_VIDEO_ID: ${{ vars.YOUTUBE_VIDEO_ID }}
+        run: python3 moon_stream.py
