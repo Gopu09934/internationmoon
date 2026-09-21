@@ -1,3 +1,4 @@
+# Save as: .github/workflows/stream.yml
 name: Moon Night 24/7 Live Stream
 
 on:
@@ -48,4 +49,5 @@ jobs:
         env:
           YOUTUBE_STREAM_KEY: ${{ secrets.YOUTUBE_STREAM_KEY }}
           YOUTUBE_VIDEO_ID: ${{ vars.YOUTUBE_VIDEO_ID }}
+          AUDIO_MODE: ${{ vars.AUDIO_MODE }}   # optional: ambient (default) | sfx | silent
         run: python3 moon_stream.py
