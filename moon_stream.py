@@ -16,8 +16,8 @@ Live chat commands (needs YOUTUBE_VIDEO_ID, see README)
   !hello      your name appears on screen with a chime
   !fact       shows a random Moon fact on screen
 
-Audio is generated too: a slow ambient drone, random pentatonic chimes, countdown
-ticks, answer-reveal and welcome sounds.
+Audio is synthesized in code too (no samples, nothing copied): an evolving pad and bells in a
+random key each run, plus countdown ticks and reveal/welcome sounds. AUDIO_MODE=ambient|sfx|silent.
 
 Usage
   YOUTUBE_STREAM_KEY=xxxx python3 moon_stream.py                 # go live
@@ -502,47 +502,90 @@ class Chat:
 # Generated audio
 # ----------------------------------------------------------------------------
 class Audio:
-    PENTA = [220.0, 261.63, 293.66, 329.63, 392.0, 440.0, 523.25, 659.25]
+    """100% synthesized audio: every sound is a sine wave computed in this file - nothing is sampled,
+    downloaded or copied, so there is no third-party recording to match.
 
-    def __init__(self):
+    Each run picks a new random key and scale and composes an endless, non-repeating pad + bell texture,
+    so the sound never loops and never matches a fixed track.
+
+    AUDIO_MODE=ambient (default) | sfx (only quiz/welcome sounds, no background) | silent (no sound)"""
+
+    SCALES = [[1, 6 / 5, 4 / 3, 3 / 2, 9 / 5],          # minor pentatonic
+              [1, 9 / 8, 5 / 4, 3 / 2, 5 / 3],          # major pentatonic
+              [1, 9 / 8, 6 / 5, 4 / 3, 3 / 2, 5 / 3, 16 / 9]]  # dorian
+
+    def __init__(self, mode=None, seed=None):
+        mode = (mode or os.environ.get("AUDIO_MODE", "ambient")).strip().lower()
+        self.mode = mode if mode in ("ambient", "sfx", "silent") else "ambient"
+        self.rng = random.Random(seed if seed is not None else int.from_bytes(os.urandom(8), "big"))
+        self.root = 65.41 * 2 ** (self.rng.randrange(12) / 12)  # random key, C2..B2
+        self.scale = self.rng.choice(self.SCALES)
         self.n = 0
-        self.voices = []
-        self.rng = random.Random(5)
-        self.next_chime = int(2 * SR)
+        self.voices = []  # short bells / effects
+        self.pads = []    # long evolving pad notes
+        self.next_pad = int(self.rng.uniform(6, 12) * SR)
+        self.next_bell = int(self.rng.uniform(3, 6) * SR)
+        if self.mode == "ambient":
+            for _ in range(4):  # start mid-texture, not from silence
+                self._pad(offset=self.rng.uniform(0, 20))
+
+    # -- building blocks ---------------------------------------------------------
+    def _note(self, oct_lo, oct_hi, fmax=1e9):
+        while True:
+            f = self.root * self.rng.choice(self.scale) * 2 ** self.rng.randint(oct_lo, oct_hi)
+            if f <= fmax:
+                return f
+
+    def _pad(self, offset=0.0):
+        self.pads.append({"s": self.n - int(offset * SR), "dur": self.rng.uniform(24, 44),
+                          "f": self._note(0, 2), "a": 0.09, "pan": self.rng.uniform(0.3, 0.7)})
 
     def _voice(self, delay, freq, amp, tau, pan=0.5):
         self.voices.append({"s": self.n + int(delay * SR), "f": freq, "a": amp, "tau": tau, "pan": pan})
 
     def sfx(self, kind):
+        if self.mode == "silent":
+            return
+        r, sc = self.root * 8, self.scale
         if kind == "tick":
             self._voice(0, 1500, 0.16, 0.03)
         elif kind == "tock":
             self._voice(0, 2200, 0.22, 0.09)
         elif kind == "reveal":
-            for i, f in enumerate((523.25, 659.25, 783.99, 1046.5)):
+            for i, f in enumerate((r, r * sc[2], r * sc[3], r * 2)):
                 self._voice(i * 0.12, f, 0.14, 0.9, 0.3 + 0.13 * i)
         elif kind == "hello":
-            self._voice(0, 783.99, 0.14, 0.8, 0.4)
-            self._voice(0.12, 1174.66, 0.12, 1.0, 0.6)
+            self._voice(0, r * sc[3], 0.14, 0.8, 0.4)
+            self._voice(0.12, r * 2 * sc[1], 0.12, 1.0, 0.6)
         elif kind == "scene":
-            self._voice(0, 587.33, 0.08, 1.4, 0.5)
+            self._voice(0, r * sc[2], 0.08, 1.4, 0.5)
 
-    @staticmethod
-    def _drone(t, detune):
-        parts = [(110.0, 0.10, 0.031, 0), (164.81, 0.07, 0.043, 1), (220.0, 0.05, 0.057, 2), (329.63, 0.03, 0.071, 3)]
-        s = 0.0
-        for f, a, lfo, ph in parts:
-            s = s + a * np.sin(2 * np.pi * f * detune * t) * (0.7 + 0.3 * np.sin(2 * np.pi * lfo * t + ph))
-        return s * 1.5
-
+    # -- one video frame worth of audio (1/30 s) -----------------------------------
     def chunk(self):
+        if self.mode == "silent":
+            self.n += SPF
+            return bytes(SPF * 4)  # stereo s16 silence (YouTube still gets a valid audio track)
         idx = np.arange(self.n, self.n + SPF, dtype=np.int64)
-        t = idx / SR
-        left, right = self._drone(t, 1.0), self._drone(t, 1.004)
-        if self.n >= self.next_chime:  # random pentatonic bell
-            f = self.rng.choice(self.PENTA) * self.rng.choice((1, 1, 2))
-            self._voice(0, f, 0.09, 1.8, self.rng.uniform(0.2, 0.8))
-            self.next_chime = self.n + int(self.rng.uniform(4, 10) * SR)
+        left, right = np.zeros(SPF), np.zeros(SPF)
+
+        if self.mode == "ambient":
+            if self.n >= self.next_pad:
+                self._pad()
+                self.next_pad = self.n + int(self.rng.uniform(8, 16) * SR)
+            if self.n >= self.next_bell:
+                self._voice(0, self._note(3, 4, 1400), 0.09, 1.8, self.rng.uniform(0.2, 0.8))
+                self.next_bell = self.n + int(self.rng.uniform(4, 10) * SR)
+            keep = []
+            for p in self.pads:
+                u = (idx - p["s"]) / (p["dur"] * SR)
+                env = np.where((u >= 0) & (u <= 1), np.sin(np.pi * np.clip(u, 0, 1)) ** 2, 0.0)
+                tt = np.maximum((idx - p["s"]) / SR, 0.0)
+                left += p["a"] * env * (np.sin(2 * np.pi * p["f"] * tt) + 0.35 * np.sin(4 * np.pi * p["f"] * tt))
+                right += p["a"] * env * (np.sin(2 * np.pi * p["f"] * 1.003 * tt) + 0.35 * np.sin(4 * np.pi * p["f"] * 1.003 * tt))
+                if (self.n - p["s"]) / SR < p["dur"]:
+                    keep.append(p)
+            self.pads = keep
+
         alive = []
         for v in self.voices:
             tt = np.maximum((idx - v["s"]) / SR, 0.0)
@@ -1000,6 +1043,7 @@ def main():
 
     print("Preparing scenes...", flush=True)
     show = Show(chat=chat)
+    print(f"Audio: mode={show.audio.mode}, random key {show.audio.root:.1f} Hz (synthesized, new every run)", flush=True)
     chat.start()
     end = time.time() + DURATION
     while end - time.time() > 10:
