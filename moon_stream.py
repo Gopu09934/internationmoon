@@ -723,7 +723,7 @@ class Show:
 
         img = Image.fromarray(frame)
         d = ImageDraw.Draw(img, "RGBA")
-        T(d, (W // 2, 50), "INTERNATIONAL OBSERVE THE MOON NIGHT", 40, WHITE, True, "mm")
+        T(d, (W // 2, 50), "HARVEST MOON 2026 LIVE", 40, WHITE, True, "mm")
         for step in (lambda: getattr(self, "_draw_" + scene)(d, img, now, t, tl, dur),
                      lambda: self._draw_banner(d, img, t, scene),
                      lambda: self._draw_ribbon(d, img, t)):
